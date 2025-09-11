@@ -76,3 +76,4 @@ typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0
 zstandard==0.24.0
+streamlit-lottie
