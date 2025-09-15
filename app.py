@@ -9,6 +9,11 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from streamlit_mic_recorder import speech_to_text
+from gtts import gTTS
+import streamlit as st
+import tempfile
+import os
 
 
 
@@ -22,6 +27,9 @@ from modules.chatbot import DataChatbot
 from modules.gemini_chat import ask_gemini
 from modules.report import PDFReport
 from modules.auth import init_users_db, create_user, check_user
+from modules.predictive import run_regression, run_classification, run_forecast
+from modules.prescriptive import generate_recommendations
+
 
 
 # --- New/advanced modules (you said you already have these) ---
@@ -29,6 +37,16 @@ from modules.forecasting import prophet_forecast, lstm_forecast
 from modules.interpretability import run_shap_explain
 from modules.auth import init_users_db, create_user, check_user
 from modules.layout_manager import save_layout, load_layouts_for_user
+
+def speak_text(text: str):
+    """Convert text to speech and play in Streamlit."""
+    try:
+        tts = gTTS(text, lang="en")
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tts.save(tmp_file.name)
+        st.audio(tmp_file.name, format="audio/mp3")
+    except Exception as e:
+        st.error(f"Speech synthesis failed: {e}")
 
 # --- Initialize customizable colors for visualizations ---
 if 'viz_colors' not in st.session_state:
@@ -79,6 +97,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+
 # Sidebar: app mode switch
 with st.sidebar:
     if (ASSETS_DIR / "logo1.png").exists():
@@ -94,6 +113,7 @@ with st.sidebar:
             st.session_state['viz_colors'][viz_type],
             key=f"color_{viz_type}"
         )
+
 # -----------------------
 # Helper functions used below
 # -----------------------
@@ -117,22 +137,41 @@ if app_mode == "📊 Modular Dashboard":
     st.title("InsightX PRO: Autonomous AI-Driven Data Intelligence and Visual Storytelling Through a No Code AI System — Modular Dashboard")
     st.markdown("Upload or select your dataset to explore. This view uses your existing modular pipeline.")
 
-    uploaded_file = st.file_uploader("Upload CSV / XLSX / JSON (max 200MB)", type=["csv", "xlsx", "xls", "json"], key="mod_upload")
-    if uploaded_file:
+    if "df_main" not in st.session_state:
+        st.session_state.df_main = None
+        st.session_state.df_main_name = None
+
+    file = st.file_uploader("Upload CSV / XLSX / JSON (max 200MB)", 
+                            type=["csv","xlsx","xls","json"], 
+                            key="dashboard_uploader")
+
+    if file:
         try:
-            df = safe_load_dataset(uploaded_file)
-            st.session_state['mod_df'] = df
-            st.success("Dataset loaded and preprocessed.")
+            if file.name.endswith(".csv"):
+                st.session_state.df_main = pd.read_csv(file)
+            elif file.name.endswith((".xlsx", ".xls")):
+                st.session_state.df_main = pd.read_excel(file)
+            elif file.name.endswith(".json"):
+                st.session_state.df_main = pd.read_json(file)
+
+            st.session_state.df_main_name = file.name
+            st.success(f"✅ Dataset loaded: {file.name} with shape {st.session_state.df_main.shape}")
+            st.dataframe(st.session_state.df_main.head())
         except Exception as e:
-            st.exception(f"Failed to load dataset: {e}")
+            st.error(f"❌ Could not load dataset: {e}")
             st.stop()
-    elif 'mod_df' not in st.session_state:
-        st.info("Upload a dataset to begin. (Or switch to Ultimate Scaffold for advanced demo.)")
+    elif st.session_state.df_main is None:
+        st.info("📂 Upload a dataset to begin. (Or switch to Ultimate Scaffold for advanced demo.)")
         st.stop()
 
-    df = st.session_state['mod_df']
+    # Use the dataset for your pipeline
+    df = st.session_state.df_main
     st.write(f"Dataset: {df.shape[0]:,} rows × {df.shape[1]:,} columns")
 
+    # 🔮 Place your modular dashboard visualizations here
+    # Example:
+    st.subheader("📊 Dataset Info")
+    st.write(df.describe(include="all"))
     # Detect column types
     num_cols = df.select_dtypes(include=np.number).columns.tolist()
     cat_cols = df.select_dtypes(include=['object','category']).columns.tolist()
@@ -280,18 +319,18 @@ if app_mode == "📊 Modular Dashboard":
     st.subheader("🏢 Executive Dashboard - Premium View")
 
     rev_col = st.selectbox("Revenue Column", [None]+num_cols)
-    cust_col = st.selectbox("Customer ID Column", [None]+df_clean.columns.tolist())
+    cust_col = st.selectbox("Customer ID Column", [None]+df.columns.tolist())
     date_col = st.selectbox("Date Column", [None]+date_cols)
 
-    kpis = compute_kpis(df_clean, revenue_col=rev_col, customer_id_col=cust_col, date_col=date_col)
+    kpis = compute_kpis(df, revenue_col=rev_col, customer_id_col=cust_col, date_col=date_col)
 
     # KPI Cards with Trend Sparkline
     k1, k2, k3, k4 = st.columns(4)
     k1.metric(label="Total Rows", value=f"{kpis['total_rows']:,}")
-    missing_trend = (kpis['missing_pct'] - df_clean.isna().mean().mean()*100)
+    missing_trend = (kpis['missing_pct'] - df.isna().mean().mean()*100)
     k2.metric(label="Missing %", value=f"{kpis['missing_pct']:.2f}%", delta=f"{missing_trend:.2f}%")
     if rev_col:
-        rev_data = df_clean.groupby(date_col)[rev_col].sum() if date_col else df_clean[rev_col]
+        rev_data = df.groupby(date_col)[rev_col].sum() if date_col else df[rev_col]
         fig_rev = px.line(rev_data, title="Revenue Trend", color_discrete_sequence=['#636EFA'])
         k3.metric(label="Total Revenue", value=f"₹{int(kpis['total_revenue']):,}")
         with st.expander("Revenue Trend Chart"):
@@ -300,7 +339,7 @@ if app_mode == "📊 Modular Dashboard":
         k3.metric(label="Total Revenue", value="N/A")
 
     if cust_col and rev_col:
-        clv_data = df_clean.groupby(cust_col)[rev_col].sum()
+        clv_data = df.groupby(cust_col)[rev_col].sum()
         fig_clv = px.histogram(clv_data, nbins=20, title="Customer Revenue Distribution", color_discrete_sequence=['#EF553B'])
         k4.metric(label="Avg Customer Value", value=f"₹{int(kpis['clv']):,}")
         with st.expander("Customer Revenue Distribution"):
@@ -311,7 +350,7 @@ if app_mode == "📊 Modular Dashboard":
     # Stakeholder Recommendations
     st.markdown("**📌 Stakeholder Recommendations**")
     cols_rec = st.columns(2)
-    for idx, rec in enumerate(stakeholder_recommendations(df_clean, kpis, revenue_col=rev_col)):
+    for idx, rec in enumerate(stakeholder_recommendations(df, kpis, revenue_col=rev_col)):
         with cols_rec[idx % 2]:
             st.info(f"💡 {rec}")
 
@@ -321,22 +360,22 @@ if app_mode == "📊 Modular Dashboard":
     if rev_col and date_col:
         with cols_chart[0]:
             st.markdown("**Revenue Over Time**")
-            st.line_chart(df_clean.groupby(date_col)[rev_col].sum())
+            st.line_chart(df.groupby(date_col)[rev_col].sum())
     if num_cols:
         with cols_chart[1]:
             st.markdown("**Numeric Columns Snapshot**")
-            st.bar_chart(df_clean[num_cols].head(10))
+            st.bar_chart(df[num_cols].head(10))
     if cat_cols:
         with cols_chart[2]:
             st.markdown("**Top Categories**")
-            top_cat = df_clean[cat_cols[0]].value_counts().head(10)
+            top_cat = df[cat_cols[0]].value_counts().head(10)
             st.bar_chart(top_cat)
 
     # ---------------------------
     # Descriptive Statistics
     # ---------------------------
     st.subheader("📐 Descriptive Statistics")
-    desc_num, desc_cat = descriptive_stats(df_clean)
+    desc_num, desc_cat = descriptive_stats(df)
     st.write("**Numeric Summary**")
     st.dataframe(desc_num.style.background_gradient(cmap='Blues'))
     st.write("**Categorical Summary**")
@@ -350,15 +389,18 @@ if app_mode == "📊 Modular Dashboard":
     color_box = st.color_picker("Boxplot Color", "#EF553B")
     cols_for_plots = st.multiselect("Select Numeric Columns", num_cols, default=num_cols[:2])
     for c in cols_for_plots:
-        st.plotly_chart(plotly_hist(df_clean, c, color=color_hist)[1], use_container_width=True)
-        st.plotly_chart(plotly_box(df_clean, c, color=color_box)[1], use_container_width=True)
+        st.plotly_chart(plotly_hist(df, c, color=color_hist), use_container_width=True, key=f"hist_{c}")
+        fig = plotly_hist(df, c, color=color_hist)  # returns go.Figure
+        st.plotly_chart(fig, use_container_width=True, key=f"hist2_{c}")
+        st.plotly_chart(plotly_box(df, c, color=color_box), use_container_width=True,  key=f"box_{c}")
+    
     if cat_cols:
         col_c = st.selectbox("Categorical Column for Bar/Pie", cat_cols)
-        st.plotly_chart(plotly_bar(df_clean, col_c)[1], use_container_width=True)
-        st.plotly_chart(plotly_pie(df_clean, col_c)[1], use_container_width=True)
+        st.plotly_chart(plotly_bar(df, col_c), use_container_width=True, key=f"bar_{col_c}")
+        st.plotly_chart(plotly_pie(df, col_c), use_container_width=True, key=f"pie_{col_c}")
 
     # Heatmap
-    heat_img = save_matplotlib_heatmap(df_clean)
+    heat_img = save_matplotlib_heatmap(df)
     if heat_img:
         st.image(heat_img, caption="Correlation Heatmap", use_column_width=True)
 
@@ -370,45 +412,122 @@ if app_mode == "📊 Modular Dashboard":
     outlier_summary = {}
     for c in num_cols:
         if method=="Z-score":
-            idx = zscore_outliers(df_clean, c)
+            idx = zscore_outliers(df, c)
         elif method=="IQR":
-            idx = iqr_outliers(df_clean, c)
+            idx = iqr_outliers(df, c)
         else:
-            idx = isolation_forest_outliers(df_clean, cols=num_cols, contamination=0.02)
+            idx = isolation_forest_outliers(df, cols=num_cols, contamination=0.02)
         if idx:
             outlier_summary[c] = idx
     if outlier_summary:
         st.write("Outliers detected (sample):")
         for k,v in outlier_summary.items():
             st.write(f"{k}: {len(v)} rows, sample indices: {v[:5]}")
+    
+     # ---------------------------
+# AI Conversational Assistant
+# ---------------------------
+    st.header("🤖 AI Conversational Assistant")
 
-    # ---------------------------
-    # AI Data Assistant
-    # ---------------------------
-    st.subheader("🤖 AI Data Assistant")
-    use_ai = st.checkbox("Use Gemini/OpenRouter for advanced answers")
-    user_q = st.text_input("Ask about the dataset")
-    if st.button("Ask AI") and user_q.strip():
-        if use_ai:
-            numeric_info = ", ".join([f"{c} mean={df_clean[c].mean():.2f}" for c in num_cols])
-            cat_info = ", ".join(cat_cols)
-            summary_text = f"Columns: {', '.join(df_clean.columns)}\nNumeric: {numeric_info}\nCategorical: {cat_info}"
-            prompt = f"{summary_text}\nQuestion: {user_q}\nReturn JSON or Python Plotly snippet"
-            ai_response = ask_gemini(prompt)
+# 1. Toggle model (at the top)
+    use_ai = st.checkbox("Use Gemini/OpenRouter for advanced reasoning", value=True)
+
+# 2. Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+# 3. Display past conversation
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# 4. Input row with text + mic button
+    col1, col2 = st.columns([8, 1])
+    with col1:
+        user_text = st.chat_input("💬 Type your message here...")
+    with col2:
+        mic_button = st.button("🎤 Speak")
+
+# 5. If mic is pressed → get voice input
+    voice_text = None
+    if mic_button:
+       voice_text = speech_to_text(language="en", use_container_width=True, just_once=True, key="voice_chat")
+
+# Final input (voice overrides text if available)
+    final_input = voice_text if voice_text else user_text
+
+# 6. File/image uploader (under + icon)
+    uploaded_df, uploaded_name = None, None
+    with st.expander("➕ Upload files (CSV, Excel, Images)"):
+        uploaded_files = st.file_uploader("Upload files", type=["csv", "xlsx", "png", "jpg"], accept_multiple_files=False)
+        if uploaded_files:
+            uploaded_name = uploaded_files.name
+            file_type = uploaded_name.split(".")[-1].lower()
+
             try:
-                chart_json = json.loads(ai_response)
-                if chart_json.get("type")=="bar":
-                    fig = px.bar(x=chart_json["data"][0]["x"], y=chart_json["data"][0]["y"])
-                    st.plotly_chart(fig)
-                else:
-                    st.write(ai_response)
-            except:
-                st.write(ai_response)
-        else:
-            chatbot = DataChatbot(df_clean)
-            ans = chatbot.ask(user_q)
-            st.write(ans)
+                if file_type == "csv":
+                    uploaded_df = pd.read_csv(uploaded_files)
+                elif file_type in ["xls", "xlsx"]:
+                    uploaded_df = pd.read_excel(uploaded_files)
 
+                if uploaded_df is not None:
+                   st.success(f"✅ Loaded dataset: {uploaded_name}")
+                   st.dataframe(uploaded_df.head())
+            except Exception as e:
+                st.error(f"❌ Could not load dataset: {e}")
+
+# 7. Build dataset context (global first, then local)
+    dataset_context = ""
+    if "df_main" in st.session_state and st.session_state.df_main is not None:
+        df_preview = st.session_state.df_main.head(3).to_dict()
+        dataset_context = f"""
+        Global dataset '{st.session_state.df_main_name}' loaded with shape {st.session_state.df_main.shape}.
+        Columns: {list(st.session_state.df_main.columns)}.
+        Sample data:\n{df_preview}
+        """
+    elif uploaded_df is not None:
+        df_preview = uploaded_df.head(3).to_dict()
+        dataset_context = f"""
+        Local dataset '{uploaded_name}' loaded with shape {uploaded_df.shape}.
+        Columns: {list(uploaded_df.columns)}.
+        Sample data:\n{df_preview}
+        """
+
+# 8. Process new input
+    if final_input:
+    # Show user message
+        st.session_state.messages.append({"role": "user", "content": final_input})
+        with st.chat_message("user"):
+            st.markdown(final_input)
+
+    # Bot reply
+        if use_ai:
+           history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages])
+           prompt = f"""
+           You are a friendly AI assistant. Maintain conversational context.
+
+           Chat history:\n{history_text}\n
+
+           {dataset_context}
+
+           User: {final_input}\n
+           Reply conversationally (like ChatGPT).
+           """
+           bot_reply = ask_gemini(prompt)
+        else:
+           if "chatbot" not in st.session_state:
+               st.session_state.chatbot = DataChatbot(st.session_state.df_main if st.session_state.df_main is not None else uploaded_df)
+           bot_reply = st.session_state.chatbot.ask(final_input)
+           if isinstance(bot_reply, dict) and "response" in bot_reply:
+               bot_reply = bot_reply["response"]
+
+    # Show bot message
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+        with st.chat_message("assistant"):
+            st.markdown(bot_reply)
+
+    # 9. Speak response out loud
+        speak_text(str(bot_reply))
     # ---------------------------
     # Auto Dashboard
     # ---------------------------
@@ -416,11 +535,11 @@ if app_mode == "📊 Modular Dashboard":
     st.header("🌈 Auto Dashboard")
     if num_cols:
         st.subheader("Numeric Columns")
-        st.bar_chart(df_clean[num_cols])
+        st.bar_chart(df[num_cols])
     if cat_cols:
         st.subheader("Categorical Columns")
         for col in cat_cols:
-            vc = df_clean[col].value_counts().reset_index()
+            vc = df[col].value_counts().reset_index()
             vc.columns = [col, 'count']
             fig = px.bar(vc, x=col, y='count', title=f"Distribution of {col}", color='count')
             st.plotly_chart(fig, use_container_width=True)
@@ -428,69 +547,68 @@ if app_mode == "📊 Modular Dashboard":
       # ---------------------------
 # Export Reports
 # ---------------------------
-st.subheader("💾 Export Reports")
+    st.subheader("💾 Export Reports")
 
 # Wrap everything inside the button block
-if st.button("📊 Export Analytics Report"):
-    buffer = io.BytesIO()
+    if st.button("📊 Export Analytics Report"):
+        buffer = io.BytesIO()
 
     # Recalculate all needed variables inside this block
-    desc_num, desc_cat = descriptive_stats(df_clean)
-    miss = missing_value_report(df_clean)
-
-    kpis = compute_kpis(df_clean, revenue_col=rev_col, customer_id_col=cust_col, date_col=date_col)
+        desc_num, desc_cat = descriptive_stats(df)
+        miss = missing_value_report(df)
+        kpis = compute_kpis(df, revenue_col=rev_col, customer_id_col=cust_col, date_col=date_col)
 
     # Recompute outliers
-    outlier_summary = {}
-    method = "IQR"
-    for c in num_cols:
-        idx = iqr_outliers(df_clean, c)
-        if idx:
-            outlier_summary[c] = idx
+        outlier_summary = {}
+        method = "IQR"
+        for c in num_cols:
+            idx = iqr_outliers(df, c)
+            if idx:
+                outlier_summary[c] = idx
 
     # AI response (optional)
-    user_q = user_q if 'user_q' in locals() else ""
-    ai_response = ai_response if 'ai_response' in locals() else ""
+        user_q = user_q if 'user_q' in locals() else ""
+        ai_response = ai_response if 'ai_response' in locals() else ""
 
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         # 1. Cleaned Data
-        df_clean.to_excel(writer, sheet_name="Cleaned_Data", index=False)
+           df.to_excel(writer, sheet_name="Cleaned_Data", index=False)
 
         # 2. Descriptive Statistics
-        desc_num.to_excel(writer, sheet_name="Numeric_Summary")
-        desc_cat.to_excel(writer, sheet_name="Categorical_Summary")
+           desc_num.to_excel(writer, sheet_name="Numeric_Summary")
+           desc_cat.to_excel(writer, sheet_name="Categorical_Summary")
 
         # 3. Missing Values
-        miss.to_excel(writer, sheet_name="Missing_Values")
+           miss.to_excel(writer, sheet_name="Missing_Values")
 
         # 4. KPIs
-        kpi_df = pd.DataFrame(list(kpis.items()), columns=["Metric", "Value"])
-        kpi_df.to_excel(writer, sheet_name="KPIs", index=False)
+           kpi_df = pd.DataFrame(list(kpis.items()), columns=["Metric", "Value"])
+           kpi_df.to_excel(writer, sheet_name="KPIs", index=False)
 
         # 5. Outlier Summary
-        if outlier_summary:
-            outlier_df = pd.DataFrame(
-                [(col, len(rows), rows[:10]) for col, rows in outlier_summary.items()],
-                columns=["Column", "Num_Outliers", "Sample_Indices"]
-            )
-            outlier_df.to_excel(writer, sheet_name="Outliers", index=False)
+           if outlier_summary:
+               outlier_df = pd.DataFrame(
+                   [(col, len(rows), rows[:10]) for col, rows in outlier_summary.items()],
+                   columns=["Column", "Num_Outliers", "Sample_Indices"]
+                )
+               outlier_df.to_excel(writer, sheet_name="Outliers", index=False)
 
         # 6. Recommendations
-        recs = stakeholder_recommendations(df_clean, kpis, revenue_col=rev_col)
-        rec_df = pd.DataFrame({"Recommendations": recs})
-        rec_df.to_excel(writer, sheet_name="Recommendations", index=False)
+           recs = stakeholder_recommendations(df, kpis, revenue_col=rev_col)
+           rec_df = pd.DataFrame({"Recommendations": recs})
+           rec_df.to_excel(writer, sheet_name="Recommendations", index=False)
 
         # 7. (Optional) AI Assistant Logs
-        if user_q.strip() and ai_response:
-            ai_df = pd.DataFrame([[user_q, ai_response]], columns=["Question", "AI_Response"])
-            ai_df.to_excel(writer, sheet_name="AI_Insights", index=False)
+           if user_q.strip() and ai_response:
+               ai_df = pd.DataFrame([[user_q, ai_response]], columns=["Question", "AI_Response"])
+               ai_df.to_excel(writer, sheet_name="AI_Insights", index=False)
 
-    buffer.seek(0)
-    st.download_button(
-        "📥 Download Analytics Report (Excel)", 
-        data=buffer, 
-        file_name="InsightX_Analytics_Report.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        buffer.seek(0)
+        st.download_button(
+             "📥 Download Analytics Report (Excel)", 
+             data=buffer, 
+             file_name="InsightX_Analytics_Report.xlsx",
+             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 
@@ -587,7 +705,7 @@ elif app_mode == "🚀 Ultimate Scaffold":
             st.experimental_rerun()
         if c2.button("Down", key=f"ult_down_{idx}") and idx < len(st.session_state['ult_layout'])-1:
             st.session_state['ult_layout'][idx+1], st.session_state['ult_layout'][idx] = st.session_state['ult_layout'][idx], st.session_state['ult_layout'][idx+1]
-            st.experimental_rerun()
+            st.rerun()
 
     # Save / load layouts (per-user)
     if st.session_state.get('ult_username'):
@@ -705,18 +823,142 @@ elif app_mode == "🚀 Ultimate Scaffold":
     # Predictive + SHAP (auto)
     st.markdown("---")
     st.subheader("Auto Predictive + Interpretability (Demo)")
+
     if st.button("Run Auto Predictive + SHAP", key="ult_run_predict"):
         try:
-            run_shap_explain(df)  # expecting your interpretability module handles detection/training & plotting
+        # Check if DataFrame exists and is not empty
+            if df is not None and not df.empty:
+                numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+                if numeric_cols:
+                # Call SHAP explain function
+                   run_shap_explain(df)
+                else:
+                    st.info("No numeric columns available for SHAP explainability.")  
+            
+
+            # Call SHAP explain function
+                
+            else:
+                 st.info("No data available for SHAP explainability.")
         except TypeError:
-            # fallback signature: run_shap_explain(model, X, X_test) or run_shap_explain(df, numeric_cols, cat_cols)
+        # fallback: only numeric columns
             try:
-                num_cols = df.select_dtypes(include=np.number).columns.tolist()
-                run_shap_explain(df, num_cols)  # try another common signature
+                numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+                if numeric_cols:
+                    run_shap_explain(df, numeric_cols)  # pass as positional argument
+                else:
+                    st.info("No numeric columns available for SHAP explainability.")
             except Exception as e:
-                st.error(f"run_shap_explain failed: {e}")
+                st.error(f"run_shap_explain failed: {e}")    
         except Exception as e:
             st.error(f"Predictive+SHAP pipeline error: {e}")
+             # ---------------------------
+# AI Conversational Assistant (inside Ultimate Scaffold)
+# ---------------------------
+    st.header("🤖 AI Conversational Assistant")
+
+# 1. Toggle model
+    use_ai = st.checkbox("Use Gemini/OpenRouter for advanced reasoning", value=True)
+
+# 2. Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+# 3. Display past conversation
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# 4. Input row with text + mic button
+    col1, col2 = st.columns([8, 1])
+    with col1:
+         user_text = st.chat_input("💬 Type your message here...")
+    with col2:
+        mic_button = st.button("🎤 Speak")
+
+# 5. If mic is pressed → get voice input
+    voice_text = None
+    if mic_button:
+        voice_text = speech_to_text(language="en", use_container_width=True, just_once=True, key="voice_chat")
+ 
+# Final input (voice overrides text if available)
+    final_input = voice_text if voice_text else user_text
+
+# 6. File/image uploader (under + icon)
+    uploaded_df, uploaded_name = None, None
+    with st.expander("➕ Upload files (CSV, Excel, Images)"):
+        uploaded_files = st.file_uploader("Upload files", type=["csv", "xlsx", "png", "jpg"], accept_multiple_files=False)
+        if uploaded_files:
+            uploaded_name = uploaded_files.name
+            file_type = uploaded_name.split(".")[-1].lower()
+
+            try:
+               if file_type == "csv":
+                   uploaded_df = pd.read_csv(uploaded_files)
+               elif file_type in ["xls", "xlsx"]:
+                   uploaded_df = pd.read_excel(uploaded_files)
+
+               if uploaded_df is not None:
+                   st.success(f"✅ Loaded dataset: {uploaded_name}")
+                   st.dataframe(uploaded_df.head())
+            except Exception as e:
+                st.error(f"❌ Could not load dataset: {e}")
+
+# 7. Build dataset context
+    dataset_context = ""
+    if 'ult_df' in st.session_state and st.session_state['ult_df'] is not None:
+        df_preview = st.session_state['ult_df'].head(3).to_dict()
+        dataset_context = f"""
+        Local dataset 'Ultimate Scaffold Dataset' loaded with shape {st.session_state['ult_df'].shape}.
+        Columns: {list(st.session_state['ult_df'].columns)}.
+        Sample data:\n{df_preview}
+        """
+    elif "df_main" in st.session_state and st.session_state.df_main is not None:
+        df_preview = st.session_state.df_main.head(3).to_dict()
+        dataset_context = f"""
+        Global dataset '{st.session_state.df_main_name}' loaded with shape {st.session_state.df_main.shape}.
+        Columns: {list(st.session_state.df_main.columns)}.
+        Sample data:\n{df_preview}
+        """
+    elif uploaded_df is not None:
+        df_preview = uploaded_df.head(3).to_dict()
+        dataset_context = f"""
+        Local dataset '{uploaded_name}' loaded with shape {uploaded_df.shape}.
+        Columns: {list(uploaded_df.columns)}.
+        Sample data:\n{df_preview}
+        """
+
+# 8. Process new input
+    if final_input:
+        st.session_state.messages.append({"role": "user", "content": final_input})
+        with st.chat_message("user"):
+            st.markdown(final_input)
+
+        if use_ai:
+            history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages])
+            prompt = f"""
+            You are a friendly AI assistant. Maintain conversational context.
+
+            Chat history:\n{history_text}\n
+
+            {dataset_context}
+
+            User: {final_input}\n
+            Reply conversationally (like ChatGPT).
+            """
+            bot_reply = ask_gemini(prompt)
+        else:
+            if "chatbot" not in st.session_state:
+                st.session_state.chatbot = DataChatbot(st.session_state.df_main if st.session_state.df_main is not None else uploaded_df)
+            bot_reply = st.session_state.chatbot.ask(final_input)
+            if isinstance(bot_reply, dict) and "response" in bot_reply:
+               bot_reply = bot_reply["response"]
+
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+        with st.chat_message("assistant"):
+           st.markdown(bot_reply)
+
+        speak_text(str(bot_reply))      
 
     # Export area
     st.markdown("---")
@@ -772,134 +1014,709 @@ elif app_mode == "📈 Analytics Pipeline":
     else:
         st.info("Upload a dataset to start analysis.")
         st.stop()
-
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
     num_cols = df_clean.select_dtypes(include=np.number).columns.tolist()
     cat_cols = df_clean.select_dtypes(include=['object','category']).columns.tolist()
     date_cols = df_clean.select_dtypes(include=['datetime64[ns]']).columns.tolist()
     
-    fig = px.scatter(df, x="x", y="y", size="value", color="category",
-                 animation_frame="time", animation_group="category")
+    st.subheader("📈 Interactive Scatter / Bubble Plot")
+
+    if analysis_type == "Descriptive":
+        st.header("Descriptive Analysis")
+        ...
+    elif analysis_type == "Diagnostic":
+        st.header("Diagnostic Analysis")
+        ...
+    elif analysis_type == "Predictive":
+        st.header("Predictive Analysis")
+        ...
+    elif analysis_type == "Prescriptive":
+        st.header("Prescriptive Analysis")
+
+# Let user pick columns dynamically
+    x_col = st.selectbox("Select X-axis column", df.columns)
+    y_col = st.selectbox("Select Y-axis column", df.columns)
+    size_col = st.selectbox("Select Size column (optional)", [None] + numeric_cols)
+    color_col = st.selectbox("Select Color column (optional)", [None] + df.columns.tolist())
+    time_col = st.selectbox("Select Time column for animation (optional)", [None] + date_cols)
+
+
+    # Ensure size_col is numeric
+    if size_col:
+        if not pd.api.types.is_numeric_dtype(df[size_col]):
+            st.warning(f"Size column '{size_col}' is not numeric. Ignoring size.")
+            size_col = None
+
+# Build scatterplot
+    fig = px.scatter(
+    df,
+    x=x_col,
+    y=y_col,
+    size=size_col if size_col else None,
+    color=color_col if color_col else None,
+    animation_frame=time_col if time_col else None,
+    animation_group=color_col if color_col else None,
+    title=f"{y_col} vs {x_col}"
+)
+
     st.plotly_chart(fig, use_container_width=True)
 
     # ---------------------------
-    # 1️⃣ Descriptive Analysis
-    # ---------------------------
+# 1️⃣ Descriptive Analysis
+# ---------------------------
     if analysis_type == "Descriptive":
-        st.header("Descriptive Analysis")
-        st.subheader("Numeric Summary")
-        st.dataframe(df_clean[num_cols].describe().transpose())
-        st.subheader("Categorical Summary")
-        st.dataframe(df_clean[cat_cols].describe().transpose())
+       st.header("Descriptive Analysis")
+       st.write(df.describe())
+    
+       st.subheader("Numeric Summary")
+       st.dataframe(df_clean[num_cols].describe().transpose())
+    
+       st.subheader("Categorical Summary")
+       st.dataframe(df_clean[cat_cols].describe().transpose())
 
-        st.subheader("Visualizations")
+       st.subheader("Visualizations")
+    # Histogram
+    for col in num_cols[:3]:
+        st.plotly_chart(plotly_hist(df_clean, col, color=st.session_state['viz_colors']['histogram']), use_container_width=True)
 
-        # Histogram
-        for col in num_cols[:3]:
-            st.plotly_chart(
-                plotly_hist(df_clean, col, color=st.session_state['viz_colors']['histogram']),
-                use_container_width=True
-            )
+    # Bar chart
+    for col in cat_cols[:3]:
+        st.plotly_chart(plotly_bar(df_clean, col, color=st.session_state['viz_colors']['bar']), use_container_width=True)
 
-        # Bar chart
-        for col in cat_cols[:3]:
-            st.plotly_chart(
-                plotly_bar(df_clean, col, color=st.session_state['viz_colors']['bar']),
-                use_container_width=True
-            )
+    # Boxplot
+    if len(num_cols) >= 2:
+        st.plotly_chart(plotly_box(df_clean, num_cols[0], color=st.session_state['viz_colors']['box']), use_container_width=True)
 
-        # Boxplot
-        if len(num_cols) >= 2:
-            st.plotly_chart(
-                plotly_box(df_clean, num_cols[0], color=st.session_state['viz_colors']['box']),
-                use_container_width=True
-            )
+    # Scatter
+    if len(num_cols) >= 2:
+        st.plotly_chart(plotly_scatter(df_clean, num_cols[0], num_cols[1], color=st.session_state['viz_colors']['scatter']), use_container_width=True)
 
-        # Scatter
-        if len(num_cols) >= 2:
-            st.plotly_chart(
-                plotly_scatter(df_clean, num_cols[0], num_cols[1], color=st.session_state['viz_colors']['scatter']),
-                use_container_width=True
-            )
+    # Pie chart
+    if cat_cols:
+        st.plotly_chart(plotly_pie(df_clean, cat_cols[0], color=st.session_state['viz_colors']['pie']), use_container_width=True)
 
-        # Pie chart
-        if cat_cols:
-            st.plotly_chart(
-                plotly_pie(df_clean, cat_cols[0], color=st.session_state['viz_colors']['pie']),
-                use_container_width=True
-            )
+    # Line chart (if time column exists)
+    if date_cols and num_cols:
+        st.plotly_chart(px.line(df_clean.sort_values(date_cols[0]), x=date_cols[0], y=num_cols[0], 
+                                title=f"{num_cols[0]} over {date_cols[0]}", 
+                                color_discrete_sequence=[st.session_state['viz_colors']['line']]), use_container_width=True)
 
-        # Line chart (if time column exists)
-        if date_cols and num_cols:
-            import plotly.express as px
-            st.plotly_chart(
-                px.line(
-                    df_clean.sort_values(date_cols[0]),
-                    x=date_cols[0], y=num_cols[0],
-                    title=f"{num_cols[0]} over {date_cols[0]}",
-                    color_discrete_sequence=[st.session_state['viz_colors']['line']]
-                ),
-                use_container_width=True
-            )
+    # Plain-English summary
+    st.markdown("**Plain-English Insights:**")
+    st.write(f"- {len(num_cols)} numeric columns with typical ranges and means shown above.")
+    st.write(f"- {len(cat_cols)} categorical columns with frequency distributions visible in bar/pie charts.")
+    if date_cols:
+        st.write(f"- Time trends are visible for {num_cols[0]} over {date_cols[0]}.")
 
-    # ---------------------------
-    # 2️⃣ Diagnostic Analysis
-    # ---------------------------
-    elif analysis_type == "Diagnostic":
-        st.header("Diagnostic Analysis")
-        st.subheader("Missing Values")
-        st.dataframe(df_clean.isna().sum())
+                     # ---------------------------
+# AI Conversational Assistant (inside Ultimate Scaffold)
+# ---------------------------
+    st.header("🤖 AI Conversational Assistant")
 
-        st.subheader("Outlier Detection")
-        method = st.radio("Method", ["Z-score","IQR","Isolation Forest"])
-        outlier_results = {}
-        for col in num_cols:
-            if method == "Z-score":
-                outlier_results[col] = zscore_outliers(df_clean, col)
-            elif method == "IQR":
-                outlier_results[col] = iqr_outliers(df_clean, col)
-            else:
-                outlier_results = isolation_forest_outliers(df_clean, cols=num_cols, contamination=0.02)
-                break
-        st.write(outlier_results)
+# 1. Toggle model
+    use_ai = st.checkbox("Use Gemini/OpenRouter for advanced reasoning", value=True)
 
-        st.subheader("Correlation Heatmap")
-        if len(num_cols) >= 2:
-            import plotly.express as px
-            corr = df_clean[num_cols].corr()
-            st.plotly_chart(
-                px.imshow(
-                    corr, text_auto=True, aspect="auto",
-                    color_continuous_scale=[st.session_state['viz_colors']['heatmap']] if 'heatmap' in st.session_state['viz_colors'] else "Viridis"
-                ),
-                use_container_width=True
-            )
+# 2. Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-    # ---------------------------
-    # 3️⃣ Predictive Analysis
-    # ---------------------------
-    elif analysis_type == "Predictive":
-        st.header("Predictive Analysis")
-        target = st.selectbox("Select target variable", options=df_clean.columns)
-        task_type = "regression" if df_clean[target].dtype in [np.float64, np.int64] else "classification"
-        
-        st.subheader(f"{task_type.title()} Modeling")
-        if st.button("Run Predictive Model"):
-            if task_type == "regression":
-                run_regression(df_clean, target)
-            else:
-                run_classification(df_clean, target)
+# 3. Display past conversation
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-        st.subheader("Forecasting (Time Series)")
-        if date_cols and num_cols:
-            sel_date = st.selectbox("Select Date Column", date_cols)
-            sel_metric = st.selectbox("Select Metric to Forecast", num_cols)
+# 4. Input row with text + mic button
+    col1, col2 = st.columns([8, 1])
+    with col1:
+         user_text = st.chat_input("💬 Type your message here...")
+    with col2:
+        mic_button = st.button("🎤 Speak")
+
+# 5. If mic is pressed → get voice input
+    voice_text = None
+    if mic_button:
+        voice_text = speech_to_text(language="en", use_container_width=True, just_once=True, key="voice_chat")
+ 
+# Final input (voice overrides text if available)
+    final_input = voice_text if voice_text else user_text
+
+# 6. File/image uploader (under + icon)
+    uploaded_df, uploaded_name = None, None
+    with st.expander("➕ Upload files (CSV, Excel, Images)"):
+        uploaded_files = st.file_uploader("Upload files", type=["csv", "xlsx", "png", "jpg"], accept_multiple_files=False)
+        if uploaded_files:
+            uploaded_name = uploaded_files.name
+            file_type = uploaded_name.split(".")[-1].lower()
+
+            try:
+               if file_type == "csv":
+                   uploaded_df = pd.read_csv(uploaded_files)
+               elif file_type in ["xls", "xlsx"]:
+                   uploaded_df = pd.read_excel(uploaded_files)
+
+               if uploaded_df is not None:
+                   st.success(f"✅ Loaded dataset: {uploaded_name}")
+                   st.dataframe(uploaded_df.head())
+            except Exception as e:
+                st.error(f"❌ Could not load dataset: {e}")
+
+# 7. Build dataset context
+    dataset_context = ""
+    if df is not None:
+       df_preview = df.head(3).to_dict()
+       dataset_context = f"""
+       Current dataset loaded with shape {df.shape}.
+       Columns: {list(df.columns)}.
+       Sample data:\n{df_preview}
+       """
+    elif "df_main" in st.session_state and st.session_state.df_main is not None:
+        df_preview = st.session_state.df_main.head(3).to_dict()
+        dataset_context = f"""
+        Global dataset '{st.session_state.df_main_name}' loaded with shape {st.session_state.df_main.shape}.
+        Columns: {list(st.session_state.df_main.columns)}.
+        Sample data:\n{df_preview}
+        """
+    elif uploaded_df is not None:
+        df_preview = uploaded_df.head(3).to_dict()
+        dataset_context = f"""
+        Local dataset '{uploaded_name}' loaded with shape {uploaded_df.shape}.
+        Columns: {list(uploaded_df.columns)}.
+        Sample data:\n{df_preview}
+        """
+
+# 8. Process new input
+    if final_input:
+        st.session_state.messages.append({"role": "user", "content": final_input})
+        with st.chat_message("user"):
+            st.markdown(final_input)
+
+        if use_ai:
+            history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages])
+            prompt = f"""
+            You are a friendly AI assistant. Maintain conversational context.
+
+            Chat history:\n{history_text}\n
+
+            {dataset_context}
+
+            User: {final_input}\n
+            Reply conversationally (like ChatGPT).
+            """
+            bot_reply = ask_gemini(prompt)
+        else:
+            if "chatbot" not in st.session_state:
+                st.session_state.chatbot = DataChatbot(st.session_state.df_main if st.session_state.df_main is not None else uploaded_df)
+            bot_reply = st.session_state.chatbot.ask(final_input)
+            if isinstance(bot_reply, dict) and "response" in bot_reply:
+               bot_reply = bot_reply["response"]
+
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+        with st.chat_message("assistant"):
+           st.markdown(bot_reply)
+
+        speak_text(str(bot_reply))      
+
+    # Export area
+    st.markdown("---")
+    st.subheader("Export & Reports")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Export Excel Report ", key="export_excel"):
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="data", index=False)
+            buf.seek(0)
+            st.download_button("Download Excel", data=buf, file_name=f"Analytics_report_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    with col2:
+        if st.button("Export Layout JSON", key="export_layout"):
+            layout_json = {'layout': st.session_state.get('layout', [])}
+            st.download_button("Download Layout JSON", data=json.dumps(layout_json), file_name=f"layout_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+
+
+
+# ---------------------------
+# 2️⃣ Diagnostic Analysis
+# ---------------------------
+elif analysis_type == "Diagnostic":
+    st.header("Diagnostic Analysis")
+
+    # Missing values
+    st.subheader("Missing Values")
+    st.dataframe(df_clean.isna().sum())
+    st.write(f"- Total missing values percentage: {df_clean.isna().mean().mean()*100:.2f}%")
+
+    # Outlier Detection
+    st.subheader("Outlier Detection")
+    method = st.radio("Method", ["Z-score","IQR","Isolation Forest"])
+    outlier_results = {}
+    for col in num_cols:
+        if method == "Z-score":
+            outlier_results[col] = zscore_outliers(df_clean, col)
+        elif method == "IQR":
+            outlier_results[col] = iqr_outliers(df_clean, col)
+        else:
+            outlier_results = isolation_forest_outliers(df_clean, cols=num_cols, contamination=0.02)
+            break
+    st.write(outlier_results)
+
+    # Correlation heatmap
+    st.subheader("Correlation Heatmap")
+    if len(num_cols) >= 2:
+        corr = df_clean[num_cols].corr()
+        st.plotly_chart(
+    px.imshow(
+        corr,
+        text_auto=True,
+        aspect="auto",
+        color_continuous_scale=st.session_state['viz_colors'].get('heatmap', 'Viridis')
+    ),
+    use_container_width=True
+)
+
+    # Plain-English summary
+    st.markdown("**Diagnostic Insights:**")
+    st.write("- Columns with high missing values or outliers should be handled carefully before modeling.")
+    st.write("- Correlation heatmap highlights potential multicollinearity.")
+
+                             # ---------------------------
+# AI Conversational Assistant (inside Ultimate Scaffold)
+# ---------------------------
+    st.header("🤖 AI Conversational Assistant")
+
+# 1. Toggle model
+    use_ai = st.checkbox("Use Gemini/OpenRouter for advanced reasoning", value=True)
+
+# 2. Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+# 3. Display past conversation
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# 4. Input row with text + mic button
+    col1, col2 = st.columns([8, 1])
+    with col1:
+         user_text = st.chat_input("💬 Type your message here...")
+    with col2:
+        mic_button = st.button("🎤 Speak")
+
+# 5. If mic is pressed → get voice input
+    voice_text = None
+    if mic_button:
+        voice_text = speech_to_text(language="en", use_container_width=True, just_once=True, key="voice_chat")
+ 
+# Final input (voice overrides text if available)
+    final_input = voice_text if voice_text else user_text
+
+# 6. File/image uploader (under + icon)
+    uploaded_df, uploaded_name = None, None
+    with st.expander("➕ Upload files (CSV, Excel, Images)"):
+        uploaded_files = st.file_uploader("Upload files", type=["csv", "xlsx", "png", "jpg"], accept_multiple_files=False)
+        if uploaded_files:
+            uploaded_name = uploaded_files.name
+            file_type = uploaded_name.split(".")[-1].lower()
+
+            try:
+               if file_type == "csv":
+                   uploaded_df = pd.read_csv(uploaded_files)
+               elif file_type in ["xls", "xlsx"]:
+                   uploaded_df = pd.read_excel(uploaded_files)
+
+               if uploaded_df is not None:
+                   st.success(f"✅ Loaded dataset: {uploaded_name}")
+                   st.dataframe(uploaded_df.head())
+            except Exception as e:
+                st.error(f"❌ Could not load dataset: {e}")
+
+# 7. Build dataset context
+    dataset_context = ""
+    if df is not None:
+       df_preview = df.head(3).to_dict()
+       dataset_context = f"""
+       Current dataset loaded with shape {df.shape}.
+       Columns: {list(df.columns)}.
+       Sample data:\n{df_preview}
+       """
+    elif "df_main" in st.session_state and st.session_state.df_main is not None:
+        df_preview = st.session_state.df_main.head(3).to_dict()
+        dataset_context = f"""
+        Global dataset '{st.session_state.df_main_name}' loaded with shape {st.session_state.df_main.shape}.
+        Columns: {list(st.session_state.df_main.columns)}.
+        Sample data:\n{df_preview}
+        """
+    elif uploaded_df is not None:
+        df_preview = uploaded_df.head(3).to_dict()
+        dataset_context = f"""
+        Local dataset '{uploaded_name}' loaded with shape {uploaded_df.shape}.
+        Columns: {list(uploaded_df.columns)}.
+        Sample data:\n{df_preview}
+        """
+
+# 8. Process new input
+    if final_input:
+        st.session_state.messages.append({"role": "user", "content": final_input})
+        with st.chat_message("user"):
+            st.markdown(final_input)
+
+        if use_ai:
+            history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages])
+            prompt = f"""
+            You are a friendly AI assistant. Maintain conversational context.
+
+            Chat history:\n{history_text}\n
+
+            {dataset_context}
+
+            User: {final_input}\n
+            Reply conversationally (like ChatGPT).
+            """
+            bot_reply = ask_gemini(prompt)
+        else:
+            if "chatbot" not in st.session_state:
+                st.session_state.chatbot = DataChatbot(st.session_state.df_main if st.session_state.df_main is not None else uploaded_df)
+            bot_reply = st.session_state.chatbot.ask(final_input)
+            if isinstance(bot_reply, dict) and "response" in bot_reply:
+               bot_reply = bot_reply["response"]
+
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+        with st.chat_message("assistant"):
+           st.markdown(bot_reply)
+
+        speak_text(str(bot_reply))      
+
+    # Export area
+    st.markdown("---")
+    st.subheader("Export & Reports")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Export Excel Report ", key="export_excel"):
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="data", index=False)
+            buf.seek(0)
+            st.download_button("Download Excel", data=buf, file_name=f"Analytics_report_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    with col2:
+        if st.button("Export Layout JSON", key="export_layout"):
+            layout_json = {'layout': st.session_state.get('layout', [])}
+            st.download_button("Download Layout JSON", data=json.dumps(layout_json), file_name=f"layout_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+
+
+
+# ---------------------------
+# 3️⃣ Predictive Analysis
+# ---------------------------
+elif analysis_type == "Predictive":
+    st.header("Predictive Analysis")
+    
+    target = st.selectbox("Select target variable", df_clean.columns)
+    task_type = "regression" if df_clean[target].dtype in [np.float64, np.int64] else "classification"
+    
+    st.subheader(f"{task_type.title()} Modeling")
+    if st.button("Run Predictive Model"):
+        if task_type == "regression":
+            run_regression(df_clean, target)
+        else:
+            run_classification(df_clean, target)
+
+    # Forecasting
+    st.subheader("Forecasting (Time Series)")
+    if not date_cols:
+        st.warning("No date/time column detected, forecasting cannot be performed.")
+    if date_cols and num_cols:
+        sel_date = st.selectbox("Select Date Column", date_cols)
+        sel_metric = st.selectbox("Select Metric to Forecast", num_cols)
+        if st.button("Run Forecast"):
             run_forecast(df_clean, sel_date, sel_metric)
 
-    # ---------------------------
-    # 4️⃣ Prescriptive Analysis
-    # ---------------------------
-    elif analysis_type == "Prescriptive":
-        st.header("Prescriptive Analysis")
-        recs = generate_recommendations(df_clean, num_cols, cat_cols)
-        for r in recs:
-            st.info(r)
+        # Plot time series
+        st.plotly_chart(px.line(df_clean.sort_values(sel_date), x=sel_date, y=sel_metric,
+                                title=f"{sel_metric} over {sel_date}",
+                                color_discrete_sequence=[st.session_state['viz_colors']['line']]),
+                        use_container_width=True)
+
+    # Plain-English summary
+    st.markdown("**Predictive Insights:**")
+    st.write(f"- Task type detected: {task_type}")
+    st.write(f"- Key numeric predictors: {num_cols[:5]}")
+    st.write(f"- Key categorical predictors: {cat_cols[:5]}")
+    if date_cols:
+        st.write(f"- Time series trends are analyzed for forecasting.")
+         
+                                # ---------------------------
+# AI Conversational Assistant (inside Ultimate Scaffold)
+# ---------------------------
+    st.header("🤖 AI Conversational Assistant")
+
+# 1. Toggle model
+    use_ai = st.checkbox("Use Gemini/OpenRouter for advanced reasoning", value=True)
+
+# 2. Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+# 3. Display past conversation
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# 4. Input row with text + mic button
+    col1, col2 = st.columns([8, 1])
+    with col1:
+         user_text = st.chat_input("💬 Type your message here...")
+    with col2:
+        mic_button = st.button("🎤 Speak")
+
+# 5. If mic is pressed → get voice input
+    voice_text = None
+    if mic_button:
+        voice_text = speech_to_text(language="en", use_container_width=True, just_once=True, key="voice_chat")
+ 
+# Final input (voice overrides text if available)
+    final_input = voice_text if voice_text else user_text
+
+# 6. File/image uploader (under + icon)
+    uploaded_df, uploaded_name = None, None
+    with st.expander("➕ Upload files (CSV, Excel, Images)"):
+        uploaded_files = st.file_uploader("Upload files", type=["csv", "xlsx", "png", "jpg"], accept_multiple_files=False)
+        if uploaded_files:
+            uploaded_name = uploaded_files.name
+            file_type = uploaded_name.split(".")[-1].lower()
+
+            try:
+               if file_type == "csv":
+                   uploaded_df = pd.read_csv(uploaded_files)
+               elif file_type in ["xls", "xlsx"]:
+                   uploaded_df = pd.read_excel(uploaded_files)
+
+               if uploaded_df is not None:
+                   st.success(f"✅ Loaded dataset: {uploaded_name}")
+                   st.dataframe(uploaded_df.head())
+            except Exception as e:
+                st.error(f"❌ Could not load dataset: {e}")
+
+# 7. Build dataset context
+    dataset_context = ""
+    if df is not None:
+       df_preview = df.head(3).to_dict()
+       dataset_context = f"""
+       Current dataset loaded with shape {df.shape}.
+       Columns: {list(df.columns)}.
+       Sample data:\n{df_preview}
+       """
+    elif "df_main" in st.session_state and st.session_state.df_main is not None:
+        df_preview = st.session_state.df_main.head(3).to_dict()
+        dataset_context = f"""
+        Global dataset '{st.session_state.df_main_name}' loaded with shape {st.session_state.df_main.shape}.
+        Columns: {list(st.session_state.df_main.columns)}.
+        Sample data:\n{df_preview}
+        """
+    elif uploaded_df is not None:
+        df_preview = uploaded_df.head(3).to_dict()
+        dataset_context = f"""
+        Local dataset '{uploaded_name}' loaded with shape {uploaded_df.shape}.
+        Columns: {list(uploaded_df.columns)}.
+        Sample data:\n{df_preview}
+        """
+
+# 8. Process new input
+    if final_input:
+        st.session_state.messages.append({"role": "user", "content": final_input})
+        with st.chat_message("user"):
+            st.markdown(final_input)
+
+        if use_ai:
+            history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages])
+            prompt = f"""
+            You are a friendly AI assistant. Maintain conversational context.
+
+            Chat history:\n{history_text}\n
+
+            {dataset_context}
+
+            User: {final_input}\n
+            Reply conversationally (like ChatGPT).
+            """
+            bot_reply = ask_gemini(prompt)
+        else:
+            if "chatbot" not in st.session_state:
+                st.session_state.chatbot = DataChatbot(st.session_state.df_main if st.session_state.df_main is not None else uploaded_df)
+            bot_reply = st.session_state.chatbot.ask(final_input)
+            if isinstance(bot_reply, dict) and "response" in bot_reply:
+               bot_reply = bot_reply["response"]
+
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+        with st.chat_message("assistant"):
+           st.markdown(bot_reply)
+
+        speak_text(str(bot_reply))      
+
+    # Export area
+    st.markdown("---")
+    st.subheader("Export & Reports")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Export Excel Report ", key="export_excel"):
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="data", index=False)
+            buf.seek(0)
+            st.download_button("Download Excel", data=buf, file_name=f"Analytics_report_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    with col2:
+        if st.button("Export Layout JSON", key="export_layout"):
+            layout_json = {'layout': st.session_state.get('layout', [])}
+            st.download_button("Download Layout JSON", data=json.dumps(layout_json), file_name=f"layout_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+
+
+
+# ---------------------------
+# 4️⃣ Prescriptive Analysis
+# ---------------------------
+elif analysis_type == "Prescriptive":
+    st.header("Prescriptive Analysis")
+    
+    recs = generate_recommendations(df_clean, num_cols, cat_cols)
+    st.subheader("Recommendations")
+    for r in recs:
+        st.info(r)
+
+    # Visual recommendations (optional)
+    if num_cols:
+        st.subheader("Numeric Column Summary")
+        for col in num_cols[:3]:
+            st.plotly_chart(plotly_hist(df_clean, col, color=st.session_state['viz_colors']['histogram']), use_container_width=True)
+    if cat_cols:
+        st.subheader("Categorical Column Summary")
+        for col in cat_cols[:3]:
+            st.plotly_chart(plotly_bar(df_clean, col, color=st.session_state['viz_colors']['bar']), use_container_width=True)
+
+    # Plain-English summary
+    st.markdown("**Prescriptive Insights:**")
+    st.write("- Take action on high-missing and high-outlier columns.")
+    st.write("- Consider feature selection based on correlations before modeling.")
+    st.write("- Monitor time trends for strategic planning.")
+
+                                   # ---------------------------
+# AI Conversational Assistant (inside Ultimate Scaffold)
+# ---------------------------
+    st.header("🤖 AI Conversational Assistant")
+
+# 1. Toggle model
+    use_ai = st.checkbox("Use Gemini/OpenRouter for advanced reasoning", value=True)
+
+# 2. Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+# 3. Display past conversation
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# 4. Input row with text + mic button
+    col1, col2 = st.columns([8, 1])
+    with col1:
+         user_text = st.chat_input("💬 Type your message here...")
+    with col2:
+        mic_button = st.button("🎤 Speak")
+
+# 5. If mic is pressed → get voice input
+    voice_text = None
+    if mic_button:
+        voice_text = speech_to_text(language="en", use_container_width=True, just_once=True, key="voice_chat")
+ 
+# Final input (voice overrides text if available)
+    final_input = voice_text if voice_text else user_text
+
+# 6. File/image uploader (under + icon)
+    uploaded_df, uploaded_name = None, None
+    with st.expander("➕ Upload files (CSV, Excel, Images)"):
+        uploaded_files = st.file_uploader("Upload files", type=["csv", "xlsx", "png", "jpg"], accept_multiple_files=False)
+        if uploaded_files:
+            uploaded_name = uploaded_files.name
+            file_type = uploaded_name.split(".")[-1].lower()
+
+            try:
+               if file_type == "csv":
+                   uploaded_df = pd.read_csv(uploaded_files)
+               elif file_type in ["xls", "xlsx"]:
+                   uploaded_df = pd.read_excel(uploaded_files)
+
+               if uploaded_df is not None:
+                   st.success(f"✅ Loaded dataset: {uploaded_name}")
+                   st.dataframe(uploaded_df.head())
+            except Exception as e:
+                st.error(f"❌ Could not load dataset: {e}")
+
+# 7. Build dataset context
+    dataset_context = ""
+    if df is not None:
+       df_preview = df.head(3).to_dict()
+       dataset_context = f"""
+       Current dataset loaded with shape {df.shape}.
+       Columns: {list(df.columns)}.
+       Sample data:\n{df_preview}
+       """
+    elif "df_main" in st.session_state and st.session_state.df_main is not None:
+        df_preview = st.session_state.df_main.head(3).to_dict()
+        dataset_context = f"""
+        Global dataset '{st.session_state.df_main_name}' loaded with shape {st.session_state.df_main.shape}.
+        Columns: {list(st.session_state.df_main.columns)}.
+        Sample data:\n{df_preview}
+        """
+    elif uploaded_df is not None:
+        df_preview = uploaded_df.head(3).to_dict()
+        dataset_context = f"""
+        Local dataset '{uploaded_name}' loaded with shape {uploaded_df.shape}.
+        Columns: {list(uploaded_df.columns)}.
+        Sample data:\n{df_preview}
+        """
+
+# 8. Process new input
+    if final_input:
+        st.session_state.messages.append({"role": "user", "content": final_input})
+        with st.chat_message("user"):
+            st.markdown(final_input)
+
+        if use_ai:
+            history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages])
+            prompt = f"""
+            You are a friendly AI assistant. Maintain conversational context.
+
+            Chat history:\n{history_text}\n
+
+            {dataset_context}
+
+            User: {final_input}\n
+            Reply conversationally (like ChatGPT).
+            """
+            bot_reply = ask_gemini(prompt)
+        else:
+            if "chatbot" not in st.session_state:
+                st.session_state.chatbot = DataChatbot(st.session_state.df_main if st.session_state.df_main is not None else uploaded_df)
+            bot_reply = st.session_state.chatbot.ask(final_input)
+            if isinstance(bot_reply, dict) and "response" in bot_reply:
+               bot_reply = bot_reply["response"]
+
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+        with st.chat_message("assistant"):
+           st.markdown(bot_reply)
+
+        speak_text(str(bot_reply))      
+
+    # Export area
+    st.markdown("---")
+    st.subheader("Export & Reports")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Export Excel Report ", key="export_excel"):
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="data", index=False)
+            buf.seek(0)
+            st.download_button("Download Excel", data=buf, file_name=f"Analytics_report_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    with col2:
+        if st.button("Export Layout JSON", key="export_layout"):
+            layout_json = {'layout': st.session_state.get('layout', [])}
+            st.download_button("Download Layout JSON", data=json.dumps(layout_json), file_name=f"layout_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
