@@ -9,12 +9,13 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from streamlit_mic_recorder import speech_to_text
+from streamlit_mic_recorder import mic_recorder
+import speech_recognition as sr
 from gtts import gTTS
 import streamlit as st
 import tempfile
 import os
-
+import base64
 
 
 # --- Modular imports (your existing modules) ---
@@ -442,19 +443,51 @@ if app_mode == "📊 Modular Dashboard":
             st.markdown(msg["content"])
 
 # 4. Input row with text + mic button
+    if "voice_text" not in st.session_state:
+        st.session_state.voice_text = None
     col1, col2 = st.columns([8, 1])
     with col1:
         user_text = st.chat_input("💬 Type your message here...")
     with col2:
-        mic_button = st.button("🎤 Speak")
+        audio_data = mic_recorder(
+             start_prompt="🎤Start recording",
+             stop_prompt="Stop recording",
+             just_once=True,
+             use_container_width=True,
+             key="voice_chat"
+        )
+        if audio_data:
+            audio_bytes = audio_data.get("data")  # <-- Important
+        # Save audio to a temp file
+            if audio_bytes:
+               with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+                   f.write(audio_bytes)
+                   temp_file = f.name
 
+        # Recognize speech
+               recognizer = sr.Recognizer()
+               with sr.AudioFile(temp_file) as source:
+                  audio = recognizer.record(source)
+                  try:
+                      st.session_state.voice_text = recognizer.recognize_google(audio)
+                      st.success(f"🗣 Recognized: {st.session_state.voice_text}")
+                  except sr.UnknownValueError:
+                      st.error("❌ Could not understand audio")
+                  except sr.RequestError:
+                      st.error("❌ Speech recognition service error")
+
+# ---------------------------
+# Final input (voice overrides text)
+# ---------------------------
+    final_input = st.session_state.voice_text if st.session_state.voice_text else user_text
+
+# Clear voice input after using it
+    if final_input:
+        st.session_state.voice_text = None
 # 5. If mic is pressed → get voice input
-    voice_text = None
-    if mic_button:
-       voice_text = speech_to_text(language="en", use_container_width=True, just_once=True, key="voice_chat")
-
+    
 # Final input (voice overrides text if available)
-    final_input = voice_text if voice_text else user_text
+
 
 # 6. File/image uploader (under + icon)
     uploaded_df, uploaded_name = None, None
@@ -526,91 +559,121 @@ if app_mode == "📊 Modular Dashboard":
         with st.chat_message("assistant"):
             st.markdown(bot_reply)
 
-    # 9. Speak response out loud
-        speak_text(str(bot_reply))
-    # ---------------------------
-    # Auto Dashboard
-    # ---------------------------
+# 9. Speak response out loud (with play/pause)
+        if bot_reply:
+            tts = gTTS(bot_reply, lang='en')
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmpfile:
+               tts.save(tmpfile.name)
+               audio_file_path = tmpfile.name
+
+    # Read audio file as base64 to embed
+            with open(audio_file_path, "rb") as audio_file:
+               audio_bytes = audio_file.read()
+               audio_b64 = base64.b64encode(audio_bytes).decode()
+
+            st.markdown("#### 🔊 Voice Response")
+            audio_html = f"""
+            <audio controls autoplay>
+                <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
+            </audio>
+            """
+            st.markdown(audio_html, unsafe_allow_html=True)
+
+                                  # ===========================================
+# 📦 EXPORT & REPORTS AREA
+# ===========================================
     st.markdown("---")
-    st.header("🌈 Auto Dashboard")
-    if num_cols:
-        st.subheader("Numeric Columns")
-        st.bar_chart(df[num_cols])
-    if cat_cols:
-        st.subheader("Categorical Columns")
-        for col in cat_cols:
-            vc = df[col].value_counts().reset_index()
-            vc.columns = [col, 'count']
-            fig = px.bar(vc, x=col, y='count', title=f"Distribution of {col}", color='count')
-            st.plotly_chart(fig, use_container_width=True)
+    st.subheader("📤 Export & Reports")
 
-      # ---------------------------
-# Export Reports
-# ---------------------------
-    st.subheader("💾 Export Reports")
+# Export options
+    export_type = st.radio("Choose Export Format:", ["Excel (.xlsx)", "CSV (.csv)", "JSON (.json)", "PDF Report"], horizontal=True)
 
-# Wrap everything inside the button block
-    if st.button("📊 Export Analytics Report"):
-        buffer = io.BytesIO()
+# Prepare dataset (main or filtered)
+    export_df = filtered_df if 'filtered_df' in locals() else st.session_state.df_main
 
-    # Recalculate all needed variables inside this block
-        desc_num, desc_cat = descriptive_stats(df)
-        miss = missing_value_report(df)
-        kpis = compute_kpis(df, revenue_col=rev_col, customer_id_col=cust_col, date_col=date_col)
+    if export_df is not None and not export_df.empty:
+       if export_type == "Excel (.xlsx)":
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                export_df.to_excel(writer, sheet_name="Data", index=False)
+            # Add a summary sheet
+                summary_df = export_df.describe(include="all").transpose()
+                summary_df.to_excel(writer, sheet_name="Summary")
+            buf.seek(0)
+            st.download_button(
+                label="📥 Download Excel Report",
+                data=buf,
+                file_name=f"InsightX_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-    # Recompute outliers
-        outlier_summary = {}
-        method = "IQR"
-        for c in num_cols:
-            idx = iqr_outliers(df, c)
-            if idx:
-                outlier_summary[c] = idx
+       elif export_type == "CSV (.csv)":
+            csv_data = export_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Download CSV File",
+                data=csv_data,
+                file_name=f"InsightX_Data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
 
-    # AI response (optional)
-        user_q = user_q if 'user_q' in locals() else ""
-        ai_response = ai_response if 'ai_response' in locals() else ""
+       elif export_type == "JSON (.json)":
+             json_data = export_df.to_json(orient="records", indent=4)
+             st.download_button(
+                 label="📥 Download JSON File",
+                 data=json_data,
+                 file_name=f"InsightX_Data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                 mime="application/json"
+            )
 
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        # 1. Cleaned Data
-           df.to_excel(writer, sheet_name="Cleaned_Data", index=False)
+       elif export_type == "PDF Report":
+           try:
+               from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+               from reportlab.lib.styles import getSampleStyleSheet
+               from reportlab.lib.pagesizes import A4
 
-        # 2. Descriptive Statistics
-           desc_num.to_excel(writer, sheet_name="Numeric_Summary")
-           desc_cat.to_excel(writer, sheet_name="Categorical_Summary")
+               pdf_buffer = io.BytesIO()
+               doc = SimpleDocTemplate(pdf_buffer, pagesize=A4)
+               styles = getSampleStyleSheet()
+               content = []
 
-        # 3. Missing Values
-           miss.to_excel(writer, sheet_name="Missing_Values")
+            # Header
+               content.append(Paragraph("📊 InsightX PRO - Summary Report", styles["Title"]))
+               content.append(Spacer(1, 12))
+               content.append(Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"]))
+               content.append(Spacer(1, 12))
 
-        # 4. KPIs
-           kpi_df = pd.DataFrame(list(kpis.items()), columns=["Metric", "Value"])
-           kpi_df.to_excel(writer, sheet_name="KPIs", index=False)
+            # Dataset details
+               content.append(Paragraph(f"Dataset Shape: {export_df.shape[0]} rows × {export_df.shape[1]} columns", styles["Normal"]))
+               content.append(Spacer(1, 12))
 
-        # 5. Outlier Summary
-           if outlier_summary:
-               outlier_df = pd.DataFrame(
-                   [(col, len(rows), rows[:10]) for col, rows in outlier_summary.items()],
-                   columns=["Column", "Num_Outliers", "Sample_Indices"]
+            # Summary stats table
+               desc = export_df.describe(include="all").reset_index()
+               table_data = [desc.columns.to_list()] + desc.values.tolist()
+               content.append(Table(table_data))
+               content.append(Spacer(1, 12))
+
+            # AI summary (if exists)
+               if "messages" in st.session_state and st.session_state.messages:
+                   content.append(Paragraph("🧠 AI Conversation Summary:", styles["Heading2"]))
+                   chat_summary = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages[-5:]])
+                   content.append(Paragraph(chat_summary, styles["Normal"]))
+
+               doc.build(content)
+               pdf_buffer.seek(0)
+
+               st.download_button(
+                   label="📥 Download PDF Report",
+                   data=pdf_buffer,
+                   file_name=f"InsightX_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                   mime="application/pdf"
                 )
-               outlier_df.to_excel(writer, sheet_name="Outliers", index=False)
+           except Exception as e:
+               st.error(f"PDF export failed: {e}")
+    else:  
+        st.warning("⚠️ No dataset available for export. Please upload or generate data first.")
 
-        # 6. Recommendations
-           recs = stakeholder_recommendations(df, kpis, revenue_col=rev_col)
-           rec_df = pd.DataFrame({"Recommendations": recs})
-           rec_df.to_excel(writer, sheet_name="Recommendations", index=False)
-
-        # 7. (Optional) AI Assistant Logs
-           if user_q.strip() and ai_response:
-               ai_df = pd.DataFrame([[user_q, ai_response]], columns=["Question", "AI_Response"])
-               ai_df.to_excel(writer, sheet_name="AI_Insights", index=False)
-
-        buffer.seek(0)
-        st.download_button(
-             "📥 Download Analytics Report (Excel)", 
-             data=buffer, 
-             file_name="InsightX_Analytics_Report.xlsx",
-             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
+    st.markdown("---")
+    st.info("✅ All reports include dataset, summary statistics, and latest AI insights. For enterprise builds, reports can auto-email to admins or export to Google Drive.")
 
 # ===========================================
 # MODE 2: ULTIMATE SCAFFOLD
